@@ -51,11 +51,11 @@ type Devops struct {
 
 // Build builds the supplied chaincode image
 func (*Devops) Build(context context.Context, spec *pb.ChaincodeSpec) (*pb.ChaincodeDeploymentSpec, error) {
-	mode := viper.GetString("chaincode.chaincoderunmode")
+	mode := viper.GetString("chaincode.mode")
 	var codePackageBytes []byte
 	if mode != chaincode.DevModeUserRunsChaincode {
 		devopsLogger.Debug("Received build request for chaincode spec: %v", spec)
-		if err := checkSpec(spec); err != nil {
+		if err := CheckSpec(spec); err != nil {
 			return nil, err
 		}
 		// Get new VM and as for building of container image
@@ -95,7 +95,7 @@ func (d *Devops) Deploy(ctx context.Context, spec *pb.ChaincodeSpec) (*pb.Chainc
 	if err != nil {
 		return nil, fmt.Errorf("Error deploying chaincode: %s ", err)
 	}
-	//mode := viper.GetString("chaincode.chaincoderunmode")
+	//mode := viper.GetString("chaincode.mode")
 
 	//if mode == chaincode.DevModeUserRunsChaincode {
 	//	_, execErr := chaincode.Execute(ctx, chaincode.GetChain(chaincode.DefaultChain), transaction)
@@ -141,7 +141,7 @@ func (d *Devops) invokeOrQuery(ctx context.Context, chaincodeInvocationSpec *pb.
 		return nil, fmt.Errorf("Error deploying chaincode: %s ", err)
 	}
 
-	// mode := viper.GetString("chaincode.chaincoderunmode")
+	// mode := viper.GetString("chaincode.mode")
 
 	// //in dev mode, we invoke locally (whether user runs chaincode or validator does)
 	// if mode == chaincode.DevModeUserRunsChaincode {
@@ -175,8 +175,8 @@ func (d *Devops) Query(ctx context.Context, chaincodeInvocationSpec *pb.Chaincod
 	return d.invokeOrQuery(ctx, chaincodeInvocationSpec, false)
 }
 
-// Checks to see if chaincode resides within current package capture for language.
-func checkSpec(spec *pb.ChaincodeSpec) error {
+// CheckSpec to see if chaincode resides within current package capture for language.
+func CheckSpec(spec *pb.ChaincodeSpec) error {
 	// Don't allow nil value
 	if spec == nil {
 		return errors.New("Expected chaincode specification, nil received")
@@ -223,10 +223,10 @@ func pathExists(path string) (bool, error) {
 //BuildLocal builds a given chaincode code
 func BuildLocal(context context.Context, spec *pb.ChaincodeSpec) (*pb.ChaincodeDeploymentSpec, error) {
 	devopsLogger.Debug("Received build request for chaincode spec: %v", spec)
-	mode := viper.GetString("chaincode.chaincoderunmode")
+	mode := viper.GetString("chaincode.mode")
 	var codePackageBytes []byte
 	if mode != chaincode.DevModeUserRunsChaincode {
-		if err := checkSpec(spec); err != nil {
+		if err := CheckSpec(spec); err != nil {
 			devopsLogger.Debug("check spec failed: %s", err)
 			return nil, err
 		}

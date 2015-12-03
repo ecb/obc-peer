@@ -47,7 +47,7 @@ const (
 	// DefaultChain is the name of the default chain.
 	DefaultChain ChainName = "default"
 	// DevModeUserRunsChaincode property allows user to run chaincode in development environment
-	DevModeUserRunsChaincode       string = "dev_mode"
+	DevModeUserRunsChaincode       string = "dev"
 	chaincodeStartupTimeoutDefault int    = 5000
 	chaincodeInstallPathDefault    string = "/go/bin/"
 	peerAddressDefault             string = "0.0.0.0:30303"
@@ -179,6 +179,7 @@ func (chaincodeSupport *ChaincodeSupport) registerHandler(chaincodehandler *Hand
 	//now we are ready to receive messages and send back responses
 	chaincodehandler.responseNotifiers = make(map[string]chan *pb.ChaincodeMessage)
 	chaincodehandler.uuidMap = make(map[string]bool)
+	chaincodehandler.isTransaction = make(map[string]bool)
 
 	chaincodeLogger.Debug("registered handler complete for chaincode %s", key)
 
@@ -383,7 +384,7 @@ func (chaincodeSupport *ChaincodeSupport) LaunchChaincode(context context.Contex
 	if !chaincodeSupport.userRunsCC {
 		_, err = chaincodeSupport.launchAndWaitForRegister(context, cID, t.Uuid)
 		if err != nil {
-			chaincodeLog.Debug("launchAndWaitForRegister failed %s", err)
+			chaincodeLog.Error("launchAndWaitForRegister failed %s", err)
 			return cID, cMsg, err
 		}
 	}
@@ -509,12 +510,15 @@ func (chaincodeSupport *ChaincodeSupport) Execute(ctxt context.Context, chaincod
 	var notfy chan *pb.ChaincodeMessage
 	var err error
 	if notfy, err = handler.sendExecuteMessage(msg); err != nil {
-		return nil, fmt.Errorf("Error sending %s: %s", pb.ChaincodeMessage_INIT, err)
+		return nil, fmt.Errorf("Error sending %s: %s", msg.Type.String(), err)
 	}
 	select {
 	case ccresp := <-notfy:
-		//we delete the now that it has been delivered
+		//we delete the notifier now that it has been delivered
 		handler.deleteNotifier(msg.Uuid)
+		if ccresp.Type == pb.ChaincodeMessage_ERROR || ccresp.Type == pb.ChaincodeMessage_QUERY_ERROR {
+			return ccresp, fmt.Errorf(string(ccresp.Payload))
+		}
 		return ccresp, nil
 	case <-time.After(timeout):
 		//we delete the now that we are going away (under lock, in case chaincode comes back JIT)

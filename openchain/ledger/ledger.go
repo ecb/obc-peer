@@ -152,6 +152,16 @@ func (ledger *Ledger) GetStateDelta(blockNumber uint64) (*stateDelta, error) {
 	return fetchStateDeltaFromDB(blockNumber)
 }
 
+// ApplyRawStateDelta applies a raw state delta to the current state.
+// This should only be used as part of state synchronization. State deltas
+// can be retrieved from another peer though the Ledger.GetStateDelta function
+// or by creating state deltas with keys retrieved from
+// Ledger.GetStateSnapshot(). For an example, see TestSetRawState in
+// ledger_test.go
+func (ledger *Ledger) ApplyRawStateDelta(delta *stateDelta) error {
+	return ledger.state.applyStateDelta(delta)
+}
+
 /////////////////// blockchain related methods /////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
 
@@ -172,9 +182,19 @@ func (ledger *Ledger) GetBlockchainSize() uint64 {
 	return ledger.blockchain.getSize()
 }
 
-//GetTransactionByUUID return transaction by it's uuid
+// GetTransactionByUUID return transaction by it's uuid
 func (ledger *Ledger) GetTransactionByUUID(txUUID string) (*protos.Transaction, error) {
 	return ledger.blockchain.getTransactionByUUID(txUUID)
+}
+
+// PutRawBlock puts a raw block on the chain. This function should only be
+// used for synchronization between peers.
+func (ledger *Ledger) PutRawBlock(block *protos.Block, blockNumber uint64) error {
+	hash, err := block.GetHash()
+	if err != nil {
+		return err
+	}
+	return ledger.blockchain.persistBlock(block, blockNumber, hash, false)
 }
 
 func (ledger *Ledger) checkValidIDBegin() error {

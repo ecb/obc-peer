@@ -45,15 +45,11 @@ func init() {
 // NewConsenter constructs a consenter object.
 // Called by handler.NewConsensusHandler().
 func NewConsenter(cpi consensus.CPI) consensus.Consenter {
-	if viper.GetString("peer.mode") == "dev" {
-		return noops.New(cpi)
-	}
-
 	plugin := viper.GetString("peer.validator.consensus")
 	var algo consensus.Consenter
 	if plugin == "pbft" {
 		logger.Debug("Running with PBFT consensus")
-		algo = pbft.New(cpi)
+		algo = pbft.GetPlugin(cpi)
 	} else {
 		logger.Debug("Running with NOOPS consensus")
 		algo = noops.New(cpi)
