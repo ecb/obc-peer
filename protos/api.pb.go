@@ -9,6 +9,7 @@ It is generated from these files:
 	api.proto
 	chaincode.proto
 	devops.proto
+	events.proto
 	openchain.proto
 	server_admin.proto
 
@@ -18,18 +19,28 @@ It has these top-level messages:
 	BlockCount
 	ChaincodeID
 	ChaincodeInput
-	ChaincodeInvocationSpec
 	ChaincodeSpec
 	ChaincodeDeploymentSpec
+	ChaincodeInvocationSpec
 	ChaincodeIdentifier
 	ChaincodeRequestContext
 	ChaincodeExecutionContext
 	ChaincodeMessage
 	PutStateInfo
+	RangeQueryStateInfo
+	RangeQueryStateKeyValue
+	RangeQueryStateResponse
+	Secret
 	BuildResult
+	Interest
+	Register
+	Generic
+	OpenchainEvent
 	Transaction
 	TransactionBlock
+	TransactionResult
 	Block
+	NonHashData
 	PeerAddress
 	PeerID
 	PeerEndpoint
@@ -38,6 +49,12 @@ It has these top-level messages:
 	OpenchainMessage
 	Response
 	BlockState
+	SyncBlockRange
+	SyncBlocks
+	SyncStateSnapshotRequest
+	SyncStateSnapshot
+	SyncStateDeltasRequest
+	SyncStateDeltas
 	ServerStatus
 */
 package protos

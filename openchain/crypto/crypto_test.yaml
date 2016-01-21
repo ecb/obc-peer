@@ -1,0 +1,74 @@
+###############################################################################
+#
+#    CAs section
+#
+###############################################################################
+eca:
+
+    users:
+        user1: 1 9gvZQRwhUq9q
+        user2: 1 9gvZQRwhUq9q
+        validator: 2 9gvZQRwhUq9q
+        peer: 3 9gvZQRwhUq9q
+        TestRegistrationSameEnrollIDDifferentRole: 1 9gvZQRwhUq9q
+
+server:
+        version: "0.1"
+        rootpath: ".obc-ca"
+        port: ":50051"
+
+
+###############################################################################
+#
+#    Peer section
+#
+###############################################################################
+peer:
+
+    pki:
+          eca:
+              paddr: localhost:50051
+
+          tca:
+              paddr: localhost:50051
+
+          tlsca:
+              paddr: localhost:50051
+
+    fileSystemPath: .obc-peer
+    validator:
+        enabled: true
+        validity-period:
+            verification: false
+
+###############################################################################
+#
+#    Test parameters section
+#
+###############################################################################
+tests:
+
+    crypto:
+
+        users:
+
+            user1:
+                enrollid: user1
+                enrollpw: 9gvZQRwhUq9q
+
+            user2:
+                enrollid: user2
+                enrollpw: 9gvZQRwhUq9q
+
+            validator:
+                enrollid: validator
+                enrollpw: 9gvZQRwhUq9q
+
+            peer:
+                enrollid: peer
+                enrollpw: 9gvZQRwhUq9q
+
+            TestRegistrationSameEnrollIDDifferentRole:
+                enrollid: TestRegistrationSameEnrollIDDifferentRole
+                enrollpw: 9gvZQRwhUq9q
+

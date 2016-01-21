@@ -8,11 +8,6 @@
 			"revisionTime": "2015-05-01T06:40:42-04:00"
 		},
 		{
-			"path": "github.com/blang/semver",
-			"revision": "31b736133b98f26d5e078ec9eb591666edfd091f",
-			"revisionTime": "2015-06-20T10:58:49+02:00"
-		},
-		{
 			"path": "github.com/cpuguy83/go-md2man/md2man",
 			"revision": "71acacd42f85e5e82f70a55327789582a5200a90",
 			"revisionTime": "2015-08-03T11:35:22-04:00"
@@ -143,6 +138,11 @@
 			"revisionTime": "2015-09-03T16:45:19-07:00"
 		},
 		{
+			"path": "github.com/howeyc/gopass",
+			"revision": "ae71a9cc54fddb61d946abe9191d05a24ac0e21b",
+			"revisionTime": "2015-11-20T18:16:12-06:00"
+		},
+		{
 			"path": "github.com/inconshreveable/mousetrap",
 			"revision": "76626ae9c91c4f2a10f34cad8ce83ea42c93bb75",
 			"revisionTime": "2014-10-17T13:07:13-07:00"
@@ -166,6 +166,11 @@
 			"path": "github.com/magiconair/properties",
 			"revision": "337395e44efb4affc8bf11971e22acbd4e27a32d",
 			"revisionTime": "2015-07-31T22:42:12+02:00"
+		},
+		{
+			"path": "github.com/mattn/go-sqlite3",
+			"revision": "5651a9d9d49ec25811d08220ee972080378d52ea",
+			"revisionTime": "2015-11-06T23:54:04+09:00"
 		},
 		{
 			"path": "github.com/mitchellh/mapstructure",
@@ -221,6 +226,16 @@
 			"path": "golang.org/x/crypto/sha3",
 			"revision": "81bf7719a6b7ce9b665598222362b50122dfc13b",
 			"revisionTime": "2015-07-28T14:18:45-07:00"
+		},
+		{
+			"path": "golang.org/x/crypto/ssh",
+			"revision": "7b85b097bf7527677d54d3220065e966a0e3b613",
+			"revisionTime": "2015-11-30T17:07:01-05:00"
+		},
+		{
+			"path": "golang.org/x/crypto/ssh/terminal",
+			"revision": "7b85b097bf7527677d54d3220065e966a0e3b613",
+			"revisionTime": "2015-11-30T17:07:01-05:00"
 		},
 		{
 			"path": "golang.org/x/net/context",

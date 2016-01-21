@@ -54,16 +54,28 @@ func (block *Block) Bytes() ([]byte, error) {
 }
 
 // NewBlock creates a new Block given the input parameters.
-func NewBlock(proposerID string, transactions []*Transaction) *Block {
+func NewBlock(transactions []*Transaction) *Block {
 	block := new(Block)
-	block.ProposerID = proposerID
 	block.Transactions = transactions
 	return block
 }
 
 // GetHash returns the hash of this block.
 func (block *Block) GetHash() ([]byte, error) {
-	data, err := block.Bytes()
+
+	// copy the block and remove the non-hash data
+	blockBytes, err := block.Bytes()
+	if err != nil {
+		return nil, fmt.Errorf("Could not calculate hash of block: %s", err)
+	}
+	blockCopy, err := UnmarshallBlock(blockBytes)
+	if err != nil {
+		return nil, fmt.Errorf("Could not calculate hash of block: %s", err)
+	}
+	blockCopy.NonHashData = nil
+
+	// Hash the block
+	data, err := proto.Marshal(blockCopy)
 	if err != nil {
 		return nil, fmt.Errorf("Could not calculate hash of block: %s", err)
 	}

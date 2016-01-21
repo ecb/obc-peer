@@ -40,16 +40,9 @@ import (
 )
 
 // Build a chaincode.
-func build(context context.Context, spec *pb.ChaincodeSpec) (*pb.ChaincodeDeploymentSpec, error) {
-	fmt.Printf("Received build request for chaincode spec: %v\n", spec)
-	var codePackageBytes []byte
-	// Get new VM and as for building of container image
-	vm, err := container.NewVM()
-	if err != nil {
-		return nil, err
-	}
-	// Build the spec
-	codePackageBytes, err = vm.BuildChaincodeContainer(spec)
+func getDeploymentSpec(context context.Context, spec *pb.ChaincodeSpec) (*pb.ChaincodeDeploymentSpec, error) {
+	fmt.Printf("getting deployment spec for chaincode spec: %v\n", spec)
+	codePackageBytes, err := container.GetChaincodePackageBytes(spec)
 	if err != nil {
 		return nil, err
 	}
@@ -60,21 +53,22 @@ func build(context context.Context, spec *pb.ChaincodeSpec) (*pb.ChaincodeDeploy
 // Deploy a chaincode - i.e., build and initialize.
 func deploy(ctx context.Context, spec *pb.ChaincodeSpec) ([]byte, error) {
 	// First build and get the deployment spec
-	chaincodeDeploymentSpec, err := build(ctx, spec)
-
+	chaincodeDeploymentSpec, err := getDeploymentSpec(ctx, spec)
 	if err != nil {
 		return nil, err
 	}
+
+	tid := chaincodeDeploymentSpec.ChaincodeSpec.ChaincodeID.Name
+
 	// Now create the Transactions message and send to Peer.
-	uuid, uuidErr := util.GenerateUUID()
-	if uuidErr != nil {
-		return nil, uuidErr
-	}
-	transaction, err := pb.NewChaincodeDeployTransaction(chaincodeDeploymentSpec, uuid)
+	transaction, err := pb.NewChaincodeDeployTransaction(chaincodeDeploymentSpec, tid)
 	if err != nil {
 		return nil, fmt.Errorf("Error deploying chaincode: %s ", err)
 	}
-	return Execute(ctx, GetChain(DefaultChain), transaction)
+
+	b, err := Execute(ctx, GetChain(DefaultChain), transaction)
+
+	return b, err
 }
 
 // Invoke or query a chaincode.
@@ -86,11 +80,14 @@ func invoke(ctx context.Context, spec *pb.ChaincodeSpec, typ pb.Transaction_Type
 	if uuidErr != nil {
 		return "", nil, uuidErr
 	}
+
 	transaction, err := pb.NewChaincodeExecute(chaincodeInvocationSpec, uuid, typ)
 	if err != nil {
 		return uuid, nil, fmt.Errorf("Error deploying chaincode: %s ", err)
 	}
+
 	retval, err := Execute(ctx, GetChain(DefaultChain), transaction)
+
 	return uuid, retval, err
 }
 
@@ -110,7 +107,7 @@ func TestExecuteDeployTransaction(t *testing.T) {
 		opts = []grpc.ServerOption{grpc.Creds(creds)}
 	}
 	grpcServer := grpc.NewServer(opts...)
-	viper.Set("peer.db.path", "/var/openchain/tmpdb")
+	viper.Set("peer.fileSystemPath", "/var/openchain/test/tmpdb")
 
 	//lis, err := net.Listen("tcp", viper.GetString("peer.address"))
 
@@ -129,28 +126,27 @@ func TestExecuteDeployTransaction(t *testing.T) {
 	}
 
 	ccStartupTimeout := time.Duration(chaincodeStartupTimeoutDefault) * time.Millisecond
-	pb.RegisterChaincodeSupportServer(grpcServer, NewChaincodeSupport(DefaultChain, getPeerEndpoint, false, ccStartupTimeout))
+	pb.RegisterChaincodeSupportServer(grpcServer, NewChaincodeSupport(DefaultChain, getPeerEndpoint, false, ccStartupTimeout, nil))
 
 	go grpcServer.Serve(lis)
 
 	var ctxt = context.Background()
 
 	url := "github.com/openblockchain/obc-peer/openchain/example/chaincode/chaincode_example01"
-	version := "0.0.0"
 	f := "init"
 	args := []string{"a", "100", "b", "200"}
-	spec := &pb.ChaincodeSpec{Type: 1, ChaincodeID: &pb.ChaincodeID{Url: url, Version: version}, CtorMsg: &pb.ChaincodeInput{Function: f, Args: args}}
-	chaincodeID, _ := getChaincodeID(&pb.ChaincodeID{Url: url, Version: version})
+	spec := &pb.ChaincodeSpec{Type: 1, ChaincodeID: &pb.ChaincodeID{Path: url}, CtorMsg: &pb.ChaincodeInput{Function: f, Args: args}}
 	_, err = deploy(ctxt, spec)
+	chaincodeID := spec.ChaincodeID.Name
 	if err != nil {
-		GetChain(DefaultChain).stopChaincode(ctxt, &pb.ChaincodeID{Url: url, Version: version})
+		GetChain(DefaultChain).stopChaincode(ctxt, spec.ChaincodeID)
 		closeListenerAndSleep(lis)
 		t.Fail()
 		t.Logf("Error deploying <%s>: %s", chaincodeID, err)
 		return
 	}
 
-	GetChain(DefaultChain).stopChaincode(ctxt, &pb.ChaincodeID{Url: url, Version: version})
+	GetChain(DefaultChain).stopChaincode(ctxt, spec.ChaincodeID)
 	closeListenerAndSleep(lis)
 }
 
@@ -213,12 +209,11 @@ func checkFinalState(uuid string, chaincodeID string) error {
 // Invoke chaincode_example02
 func invokeExample02Transaction(ctxt context.Context, cID *pb.ChaincodeID, args []string) error {
 
-	chaincodeID, _ := getChaincodeID(cID)
-
 	f := "init"
 	argsDeploy := []string{"a", "100", "b", "200"}
 	spec := &pb.ChaincodeSpec{Type: 1, ChaincodeID: cID, CtorMsg: &pb.ChaincodeInput{Function: f, Args: argsDeploy}}
 	_, err := deploy(ctxt, spec)
+	chaincodeID := spec.ChaincodeID.Name
 	if err != nil {
 		return fmt.Errorf("Error deploying <%s>: %s", chaincodeID, err)
 	}
@@ -226,6 +221,7 @@ func invokeExample02Transaction(ctxt context.Context, cID *pb.ChaincodeID, args 
 	time.Sleep(time.Second)
 
 	fmt.Printf("Going to invoke\n")
+
 	f = "invoke"
 	spec = &pb.ChaincodeSpec{Type: 1, ChaincodeID: cID, CtorMsg: &pb.ChaincodeInput{Function: f, Args: args}}
 	uuid, _, err := invoke(ctxt, spec, pb.Transaction_CHAINCODE_EXECUTE)
@@ -261,7 +257,7 @@ func TestExecuteInvokeTransaction(t *testing.T) {
 		opts = []grpc.ServerOption{grpc.Creds(creds)}
 	}
 	grpcServer := grpc.NewServer(opts...)
-	viper.Set("peer.db.path", "/var/openchain/tmpdb")
+	viper.Set("peer.fileSystemPath", "/var/openchain/test/tmpdb")
 
 	//use a different address than what we usually use for "peer"
 	//we override the peerAddress set in chaincode_support.go
@@ -279,7 +275,7 @@ func TestExecuteInvokeTransaction(t *testing.T) {
 	}
 
 	ccStartupTimeout := time.Duration(chaincodeStartupTimeoutDefault) * time.Millisecond
-	pb.RegisterChaincodeSupportServer(grpcServer, NewChaincodeSupport(DefaultChain, getPeerEndpoint, false, ccStartupTimeout))
+	pb.RegisterChaincodeSupportServer(grpcServer, NewChaincodeSupport(DefaultChain, getPeerEndpoint, false, ccStartupTimeout, nil))
 
 	go grpcServer.Serve(lis)
 
@@ -287,8 +283,7 @@ func TestExecuteInvokeTransaction(t *testing.T) {
 
 	url := "github.com/openblockchain/obc-peer/openchain/example/chaincode/chaincode_example02"
 	//url := "https://github.com/prjayach/chaincode_examples/chaincode_example02"
-	version := "0.0.0"
-	chaincodeID := &pb.ChaincodeID{Url: url, Version: version}
+	chaincodeID := &pb.ChaincodeID{Path: url}
 
 	args := []string{"a", "b", "10"}
 	err = invokeExample02Transaction(ctxt, chaincodeID, args)
@@ -306,28 +301,25 @@ func TestExecuteInvokeTransaction(t *testing.T) {
 }
 
 // Execute multiple transactions and queries.
-func exec(ctxt context.Context, numTrans int, numQueries int) []error {
+func exec(ctxt context.Context, chaincodeID string, numTrans int, numQueries int) []error {
 	var wg sync.WaitGroup
 	errs := make([]error, numTrans+numQueries)
 
 	e := func(qnum int, typ pb.Transaction_Type) {
 		defer wg.Done()
-		url := "github.com/openblockchain/obc-peer/openchain/example/chaincode/chaincode_example02"
-		version := "0.0.0"
-
 		var spec *pb.ChaincodeSpec
 		if typ == pb.Transaction_CHAINCODE_EXECUTE {
 			f := "invoke"
 			args := []string{"a", "b", "10"}
 
-			spec = &pb.ChaincodeSpec{Type: 1, ChaincodeID: &pb.ChaincodeID{Url: url, Version: version}, CtorMsg: &pb.ChaincodeInput{Function: f, Args: args}}
+			spec = &pb.ChaincodeSpec{Type: 1, ChaincodeID: &pb.ChaincodeID{Name: chaincodeID}, CtorMsg: &pb.ChaincodeInput{Function: f, Args: args}}
 
 			fmt.Printf("Going to invoke TRANSACTION num %d\n", qnum)
 		} else {
 			f := "query"
 			args := []string{"a"}
 
-			spec = &pb.ChaincodeSpec{Type: 1, ChaincodeID: &pb.ChaincodeID{Url: url, Version: version}, CtorMsg: &pb.ChaincodeInput{Function: f, Args: args}}
+			spec = &pb.ChaincodeSpec{Type: 1, ChaincodeID: &pb.ChaincodeID{Name: chaincodeID}, CtorMsg: &pb.ChaincodeInput{Function: f, Args: args}}
 
 			fmt.Printf("Going to invoke QUERY num %d\n", qnum)
 		}
@@ -354,7 +346,6 @@ func exec(ctxt context.Context, numTrans int, numQueries int) []error {
 		}
 
 		if err != nil {
-			chaincodeID, _ := getChaincodeID(&pb.ChaincodeID{Url: url, Version: version})
 			errs[qnum] = fmt.Errorf("Error executing <%s>: %s", chaincodeID, err)
 			return
 		}
@@ -389,7 +380,7 @@ func TestExecuteQuery(t *testing.T) {
 		opts = []grpc.ServerOption{grpc.Creds(creds)}
 	}
 	grpcServer := grpc.NewServer(opts...)
-	viper.Set("peer.db.path", "/var/openchain/tmpdb")
+	viper.Set("peer.fileSystemPath", "/var/openchain/test/tmpdb")
 
 	//use a different address than what we usually use for "peer"
 	//we override the peerAddress set in chaincode_support.go
@@ -407,23 +398,22 @@ func TestExecuteQuery(t *testing.T) {
 	}
 
 	ccStartupTimeout := time.Duration(chaincodeStartupTimeoutDefault) * time.Millisecond
-	pb.RegisterChaincodeSupportServer(grpcServer, NewChaincodeSupport(DefaultChain, getPeerEndpoint, false, ccStartupTimeout))
+	pb.RegisterChaincodeSupportServer(grpcServer, NewChaincodeSupport(DefaultChain, getPeerEndpoint, false, ccStartupTimeout, nil))
 
 	go grpcServer.Serve(lis)
 
 	var ctxt = context.Background()
 
 	url := "github.com/openblockchain/obc-peer/openchain/example/chaincode/chaincode_example02"
-	version := "0.0.0"
 
-	cID := &pb.ChaincodeID{Url: url, Version: version}
-	chaincodeID, _ := getChaincodeID(cID)
+	cID := &pb.ChaincodeID{Path: url}
 	f := "init"
 	args := []string{"a", "100", "b", "200"}
 
 	spec := &pb.ChaincodeSpec{Type: 1, ChaincodeID: cID, CtorMsg: &pb.ChaincodeInput{Function: f, Args: args}}
 
 	_, err = deploy(ctxt, spec)
+	chaincodeID := spec.ChaincodeID.Name
 	if err != nil {
 		t.Fail()
 		t.Logf("Error initializing chaincode %s(%s)", chaincodeID, err)
@@ -436,7 +426,7 @@ func TestExecuteQuery(t *testing.T) {
 
 	numTrans := 2
 	numQueries := 10
-	errs := exec(ctxt, numTrans, numQueries)
+	errs := exec(ctxt, chaincodeID, numTrans, numQueries)
 
 	var numerrs int
 	for i := 0; i < numTrans+numQueries; i++ {
@@ -469,7 +459,7 @@ func TestExecuteInvokeInvalidTransaction(t *testing.T) {
 		opts = []grpc.ServerOption{grpc.Creds(creds)}
 	}
 	grpcServer := grpc.NewServer(opts...)
-	viper.Set("peer.db.path", "/var/openchain/tmpdb")
+	viper.Set("peer.fileSystemPath", "/var/openchain/test/tmpdb")
 
 	//use a different address than what we usually use for "peer"
 	//we override the peerAddress set in chaincode_support.go
@@ -487,15 +477,14 @@ func TestExecuteInvokeInvalidTransaction(t *testing.T) {
 	}
 
 	ccStartupTimeout := time.Duration(chaincodeStartupTimeoutDefault) * time.Millisecond
-	pb.RegisterChaincodeSupportServer(grpcServer, NewChaincodeSupport(DefaultChain, getPeerEndpoint, false, ccStartupTimeout))
+	pb.RegisterChaincodeSupportServer(grpcServer, NewChaincodeSupport(DefaultChain, getPeerEndpoint, false, ccStartupTimeout, nil))
 
 	go grpcServer.Serve(lis)
 
 	var ctxt = context.Background()
 
 	url := "github.com/openblockchain/obc-peer/openchain/example/chaincode/chaincode_example02"
-	version := "0.0.0"
-	chaincodeID := &pb.ChaincodeID{Url: url, Version: version}
+	chaincodeID := &pb.ChaincodeID{Path: url}
 
 	//FAIL, FAIL!
 	args := []string{"x", "-1"}
@@ -531,7 +520,7 @@ func TestExecuteInvalidQuery(t *testing.T) {
 		opts = []grpc.ServerOption{grpc.Creds(creds)}
 	}
 	grpcServer := grpc.NewServer(opts...)
-	viper.Set("peer.db.path", "/var/openchain/tmpdb")
+	viper.Set("peer.fileSystemPath", "/var/openchain/test/tmpdb")
 
 	//use a different address than what we usually use for "peer"
 	//we override the peerAddress set in chaincode_support.go
@@ -549,23 +538,22 @@ func TestExecuteInvalidQuery(t *testing.T) {
 	}
 
 	ccStartupTimeout := time.Duration(chaincodeStartupTimeoutDefault) * time.Millisecond
-	pb.RegisterChaincodeSupportServer(grpcServer, NewChaincodeSupport(DefaultChain, getPeerEndpoint, false, ccStartupTimeout))
+	pb.RegisterChaincodeSupportServer(grpcServer, NewChaincodeSupport(DefaultChain, getPeerEndpoint, false, ccStartupTimeout, nil))
 
 	go grpcServer.Serve(lis)
 
 	var ctxt = context.Background()
 
 	url := "github.com/openblockchain/obc-peer/openchain/example/chaincode/chaincode_example03"
-	version := "0.0.0"
 
-	cID := &pb.ChaincodeID{Url: url, Version: version}
-	chaincodeID, _ := getChaincodeID(cID)
+	cID := &pb.ChaincodeID{Path: url}
 	f := "init"
 	args := []string{"a", "100"}
 
 	spec := &pb.ChaincodeSpec{Type: 1, ChaincodeID: cID, CtorMsg: &pb.ChaincodeInput{Function: f, Args: args}}
 
 	_, err = deploy(ctxt, spec)
+	chaincodeID := spec.ChaincodeID.Name
 	if err != nil {
 		t.Fail()
 		t.Logf("Error initializing chaincode %s(%s)", chaincodeID, err)
@@ -603,7 +591,7 @@ func TestChaincodeInvokeChaincode(t *testing.T) {
 		opts = []grpc.ServerOption{grpc.Creds(creds)}
 	}
 	grpcServer := grpc.NewServer(opts...)
-	viper.Set("peer.db.path", "/var/openchain/tmpdb")
+	viper.Set("peer.fileSystemPath", "/var/openchain/test/tmpdb")
 
 	//use a different address than what we usually use for "peer"
 	//we override the peerAddress set in chaincode_support.go
@@ -621,7 +609,7 @@ func TestChaincodeInvokeChaincode(t *testing.T) {
 	}
 
 	ccStartupTimeout := time.Duration(chaincodeStartupTimeoutDefault) * time.Millisecond
-	pb.RegisterChaincodeSupportServer(grpcServer, NewChaincodeSupport(DefaultChain, getPeerEndpoint, false, ccStartupTimeout))
+	pb.RegisterChaincodeSupportServer(grpcServer, NewChaincodeSupport(DefaultChain, getPeerEndpoint, false, ccStartupTimeout, nil))
 
 	go grpcServer.Serve(lis)
 
@@ -629,16 +617,15 @@ func TestChaincodeInvokeChaincode(t *testing.T) {
 
 	// Deploy first chaincode
 	url1 := "github.com/openblockchain/obc-peer/openchain/example/chaincode/chaincode_example02"
-	version1 := "0.0.1"
 
-	cID1 := &pb.ChaincodeID{Url: url1, Version: version1}
-	chaincodeID1, _ := getChaincodeID(cID1)
+	cID1 := &pb.ChaincodeID{Path: url1}
 	f := "init"
 	args := []string{"a", "100", "b", "200"}
 
 	spec1 := &pb.ChaincodeSpec{Type: 1, ChaincodeID: cID1, CtorMsg: &pb.ChaincodeInput{Function: f, Args: args}}
 
 	_, err = deploy(ctxt, spec1)
+	chaincodeID1 := spec1.ChaincodeID.Name
 	if err != nil {
 		t.Fail()
 		t.Logf("Error initializing chaincode %s(%s)", chaincodeID1, err)
@@ -651,16 +638,15 @@ func TestChaincodeInvokeChaincode(t *testing.T) {
 
 	// Deploy second chaincode
 	url2 := "github.com/openblockchain/obc-peer/openchain/example/chaincode/chaincode_example04"
-	version2 := "0.0.1"
 
-	cID2 := &pb.ChaincodeID{Url: url2, Version: version2}
-	chaincodeID2, _ := getChaincodeID(cID2)
+	cID2 := &pb.ChaincodeID{Path: url2}
 	f = "init"
 	args = []string{"e", "0"}
 
 	spec2 := &pb.ChaincodeSpec{Type: 1, ChaincodeID: cID2, CtorMsg: &pb.ChaincodeInput{Function: f, Args: args}}
 
 	_, err = deploy(ctxt, spec2)
+	chaincodeID2 := spec2.ChaincodeID.Name
 	if err != nil {
 		t.Fail()
 		t.Logf("Error initializing chaincode %s(%s)", chaincodeID2, err)
@@ -717,7 +703,7 @@ func TestChaincodeQueryChaincode(t *testing.T) {
 		opts = []grpc.ServerOption{grpc.Creds(creds)}
 	}
 	grpcServer := grpc.NewServer(opts...)
-	viper.Set("peer.db.path", "/var/openchain/tmpdb")
+	viper.Set("peer.fileSystemPath", "/var/openchain/test/tmpdb")
 
 	//use a different address than what we usually use for "peer"
 	//we override the peerAddress set in chaincode_support.go
@@ -735,7 +721,7 @@ func TestChaincodeQueryChaincode(t *testing.T) {
 	}
 
 	ccStartupTimeout := time.Duration(chaincodeStartupTimeoutDefault) * time.Millisecond
-	pb.RegisterChaincodeSupportServer(grpcServer, NewChaincodeSupport(DefaultChain, getPeerEndpoint, false, ccStartupTimeout))
+	pb.RegisterChaincodeSupportServer(grpcServer, NewChaincodeSupport(DefaultChain, getPeerEndpoint, false, ccStartupTimeout, nil))
 
 	go grpcServer.Serve(lis)
 
@@ -743,16 +729,15 @@ func TestChaincodeQueryChaincode(t *testing.T) {
 
 	// Deploy first chaincode
 	url1 := "github.com/openblockchain/obc-peer/openchain/example/chaincode/chaincode_example02"
-	version1 := "0.0.1"
 
-	cID1 := &pb.ChaincodeID{Url: url1, Version: version1}
-	chaincodeID1, _ := getChaincodeID(cID1)
+	cID1 := &pb.ChaincodeID{Path: url1}
 	f := "init"
 	args := []string{"a", "100", "b", "200"}
 
 	spec1 := &pb.ChaincodeSpec{Type: 1, ChaincodeID: cID1, CtorMsg: &pb.ChaincodeInput{Function: f, Args: args}}
 
 	_, err = deploy(ctxt, spec1)
+	chaincodeID1 := spec1.ChaincodeID.Name
 	if err != nil {
 		t.Fail()
 		t.Logf("Error initializing chaincode %s(%s)", chaincodeID1, err)
@@ -765,16 +750,15 @@ func TestChaincodeQueryChaincode(t *testing.T) {
 
 	// Deploy second chaincode
 	url2 := "github.com/openblockchain/obc-peer/openchain/example/chaincode/chaincode_example05"
-	version2 := "0.0.1"
 
-	cID2 := &pb.ChaincodeID{Url: url2, Version: version2}
-	chaincodeID2, _ := getChaincodeID(cID2)
+	cID2 := &pb.ChaincodeID{Path: url2}
 	f = "init"
 	args = []string{"sum", "0"}
 
 	spec2 := &pb.ChaincodeSpec{Type: 1, ChaincodeID: cID2, CtorMsg: &pb.ChaincodeInput{Function: f, Args: args}}
 
 	_, err = deploy(ctxt, spec2)
+	chaincodeID2 := spec2.ChaincodeID.Name
 	if err != nil {
 		t.Fail()
 		t.Logf("Error initializing chaincode %s(%s)", chaincodeID2, err)
@@ -789,7 +773,7 @@ func TestChaincodeQueryChaincode(t *testing.T) {
 	// Invoke second chaincode, which will inturn query the first chaincode
 	t.Logf("Starting chaincode query chaincode in transaction mode")
 	f = "invoke"
-	args = []string{"github.com/openblockchain/obc-peer/openchain/example/chaincode/chaincode_example02", "0.0.1", "sum"}
+	args = []string{chaincodeID1, "sum"}
 
 	spec2 = &pb.ChaincodeSpec{Type: 1, ChaincodeID: cID2, CtorMsg: &pb.ChaincodeInput{Function: f, Args: args}}
 	// Invoke chaincode
@@ -819,7 +803,7 @@ func TestChaincodeQueryChaincode(t *testing.T) {
 	// Query second chaincode, which will inturn query the first chaincode
 	t.Logf("Starting chaincode query chaincode in query mode")
 	f = "query"
-	args = []string{"github.com/openblockchain/obc-peer/openchain/example/chaincode/chaincode_example02", "0.0.1", "sum"}
+	args = []string{chaincodeID1, "sum"}
 
 	spec2 = &pb.ChaincodeSpec{Type: 1, ChaincodeID: cID2, CtorMsg: &pb.ChaincodeInput{Function: f, Args: args}}
 	// Invoke chaincode
@@ -852,5 +836,7 @@ func TestChaincodeQueryChaincode(t *testing.T) {
 
 func TestMain(m *testing.M) {
 	SetupTestConfig()
+	viper.Set("ledger.blockchain.deploy-system-chaincode", "false")
+	viper.Set("validator.validity-period.verification", "false")
 	os.Exit(m.Run())
 }

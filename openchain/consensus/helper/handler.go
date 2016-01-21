@@ -32,17 +32,24 @@ import (
 	pb "github.com/openblockchain/obc-peer/protos"
 )
 
+var logger *logging.Logger // package-level logger
+
+func init() {
+	logger = logging.MustGetLogger("consensus/handler")
+}
+
 // ConsensusHandler handles consensus messages.
 // It also implements the CPI.
 type ConsensusHandler struct {
 	chatStream  peer.ChatStream
 	consenter   consensus.Consenter
 	coordinator peer.MessageHandlerCoordinator
-	done        chan bool
+	done        chan struct{}
 	peerHandler peer.MessageHandler
 }
 
 // NewConsensusHandler constructs a new MessageHandler for the plugin.
+// Is instance of peer.HandlerFactory
 func NewConsensusHandler(coord peer.MessageHandlerCoordinator,
 	stream peer.ChatStream, initiatedStream bool,
 	next peer.MessageHandler) (peer.MessageHandler, error) {
@@ -59,54 +66,102 @@ func NewConsensusHandler(coord peer.MessageHandlerCoordinator,
 	}
 
 	handler.consenter = controller.NewConsenter(NewHelper(coord))
-	handler.done = make(chan bool)
+	handler.done = make(chan struct{})
 
 	return handler, nil
 }
 
 // HandleMessage handles the incoming Openchain messages for the Peer.
 func (handler *ConsensusHandler) HandleMessage(msg *pb.OpenchainMessage) error {
-	if msg.Type == pb.OpenchainMessage_CONSENSUS || msg.Type == pb.OpenchainMessage_CHAIN_TRANSACTION {
-		// if this is a Tx return uuid
-		// (we have to return *something* to the blocking gRPC client)
-		if msg.Type == pb.OpenchainMessage_CHAIN_TRANSACTION {
-			var response *pb.Response
-			tx := &pb.Transaction{}
-			err := proto.Unmarshal(msg.Payload, tx)
-			if err != nil {
-				response = &pb.Response{Status: pb.Response_FAILURE, Msg: []byte(fmt.Sprintf("Error unmarshalling payload of received OpenchainMessage:%s.", msg.Type))}
-			} else {
-				response = &pb.Response{Status: pb.Response_SUCCESS, Msg: []byte(tx.Uuid)}
-			}
-			payload, err := proto.Marshal(response)
-			handler.SendMessage(&pb.OpenchainMessage{Type: pb.OpenchainMessage_RESPONSE, Payload: payload})
-		}
+	if msg.Type == pb.OpenchainMessage_CONSENSUS {
 		return handler.consenter.RecvMsg(msg)
 	}
-
-	if msg.Type == pb.OpenchainMessage_CHAIN_QUERY {
-		var response *pb.Response
-		tx := &pb.Transaction{}
-		err := proto.Unmarshal(msg.Payload, tx)
-		if err != nil {
-			response = &pb.Response{Status: pb.Response_FAILURE, Msg: []byte(fmt.Sprintf("Error unmarshalling payload of received OpenchainMessage:%s.", msg.Type))}
-		} else {
-			b, err := chaincode.Execute(context.Background(), chaincode.GetChain(chaincode.DefaultChain), tx)
-			if err != nil {
-				response = &pb.Response{Status: pb.Response_FAILURE, Msg: []byte(fmt.Sprintf("Error:%s", err))}
-			} else {
-				response = &pb.Response{Status: pb.Response_SUCCESS, Msg: b}
-			}
-		}
-		payload, _ := proto.Marshal(response)
-		handler.SendMessage(&pb.OpenchainMessage{Type: pb.OpenchainMessage_RESPONSE, Payload: payload})
-		return nil
+	if msg.Type == pb.OpenchainMessage_CHAIN_TRANSACTION {
+		return handler.doChainTransaction(msg)
 	}
-
+	if msg.Type == pb.OpenchainMessage_CHAIN_QUERY {
+		return handler.doChainQuery(msg)
+	}
 	if logger.IsEnabledFor(logging.DEBUG) {
 		logger.Debug("Did not handle message of type %s, passing on to next MessageHandler", msg.Type)
 	}
 	return handler.peerHandler.HandleMessage(msg)
+}
+
+func (handler *ConsensusHandler) doChainTransaction(msg *pb.OpenchainMessage) error {
+	var response *pb.Response
+	tx := &pb.Transaction{}
+
+	err := proto.Unmarshal(msg.Payload, tx)
+	if err != nil {
+		response = &pb.Response{Status: pb.Response_FAILURE,
+			Msg: []byte(fmt.Sprintf("Error unmarshalling payload OpenchainMessage:%s.", msg.Type))}
+	} else {
+		// Verify transaction signature if security is enabled
+		secHelper := handler.coordinator.GetSecHelper()
+		if nil != secHelper {
+			if logger.IsEnabledFor(logging.DEBUG) {
+				logger.Debug("Verifying transaction signature %s", tx.Uuid)
+			}
+			if tx, err = secHelper.TransactionPreValidation(tx); nil != err {
+				response = &pb.Response{Status: pb.Response_FAILURE, Msg: []byte(err.Error())}
+				logger.Debug("Failed to verify transaction %v", err)
+			}
+		}
+	}
+	// Send response back to the requester
+	// response will not be nil on error
+	if nil == response {
+		response = &pb.Response{Status: pb.Response_SUCCESS, Msg: []byte(tx.Uuid)}
+	}
+	payload, err := proto.Marshal(response)
+	handler.SendMessage(&pb.OpenchainMessage{Type: pb.OpenchainMessage_RESPONSE, Payload: payload})
+
+	// If we fail to marshal or verify the tx, don't send it to consensus plugin
+	if response.Status == pb.Response_FAILURE {
+		return nil
+	}
+
+	// Pass the message to the plugin handler (ie PBFT)
+	return handler.consenter.RecvMsg(msg)
+}
+
+func (handler *ConsensusHandler) doChainQuery(msg *pb.OpenchainMessage) error {
+	var response *pb.Response
+	tx := &pb.Transaction{}
+	err := proto.Unmarshal(msg.Payload, tx)
+	if err != nil {
+		response = &pb.Response{Status: pb.Response_FAILURE,
+			Msg: []byte(fmt.Sprintf("Error unmarshalling payload of received OpenchainMessage:%s.", msg.Type))}
+	} else {
+		// Verify transaction signature if security is enabled
+		secHelper := handler.coordinator.GetSecHelper()
+		if nil != secHelper {
+			if logger.IsEnabledFor(logging.DEBUG) {
+				logger.Debug("Verifying transaction signature %s", tx.Uuid)
+			}
+			if tx, err = secHelper.TransactionPreValidation(tx); nil != err {
+				response = &pb.Response{Status: pb.Response_FAILURE, Msg: []byte(err.Error())}
+				logger.Debug("Failed to verify transaction %v", err)
+			}
+		}
+		// execute if response nil (ie, no error)
+		if nil == response {
+			// The secHelper is set during creat ChaincodeSupport, so we don't need this step
+			//cxt := context.WithValue(context.Background(), "security", secHelper)
+			cxt := context.Background()
+			result, err := chaincode.Execute(cxt, chaincode.GetChain(chaincode.DefaultChain), tx)
+			if err != nil {
+				response = &pb.Response{Status: pb.Response_FAILURE,
+					Msg: []byte(fmt.Sprintf("Error:%s", err))}
+			} else {
+				response = &pb.Response{Status: pb.Response_SUCCESS, Msg: result}
+			}
+		}
+	}
+	payload, _ := proto.Marshal(response)
+	handler.SendMessage(&pb.OpenchainMessage{Type: pb.OpenchainMessage_RESPONSE, Payload: payload})
+	return nil
 }
 
 // SendMessage sends a message to the remote Peer through the stream.
@@ -122,7 +177,7 @@ func (handler *ConsensusHandler) SendMessage(msg *pb.OpenchainMessage) error {
 // Stop stops this MessageHandler, which then delegates to the contained PeerHandler to stop (and thus deregister this Peer).
 func (handler *ConsensusHandler) Stop() error {
 	err := handler.peerHandler.Stop() // deregister the handler
-	handler.done <- true
+	handler.done <- struct{}{}
 	if err != nil {
 		return fmt.Errorf("Error stopping ConsensusHandler: %s", err)
 	}
@@ -132,4 +187,17 @@ func (handler *ConsensusHandler) Stop() error {
 // To returns the PeerEndpoint this Handler is connected to by delegating to the contained PeerHandler
 func (handler *ConsensusHandler) To() (pb.PeerEndpoint, error) {
 	return handler.peerHandler.To()
+}
+
+// RequestBlocks returns the current sync block
+func (handler *ConsensusHandler) RequestBlocks(syncBlockRange *pb.SyncBlockRange) (<-chan *pb.SyncBlocks, error) {
+	return handler.peerHandler.RequestBlocks(syncBlockRange)
+}
+
+func (handler *ConsensusHandler) RequestStateSnapshot() (<-chan *pb.SyncStateSnapshot, error) {
+	return handler.peerHandler.RequestStateSnapshot()
+}
+
+func (handler *ConsensusHandler) RequestStateDeltas(syncBlockRange *pb.SyncBlockRange) (<-chan *pb.SyncStateDeltas, error) {
+	return handler.peerHandler.RequestStateDeltas(syncBlockRange)
 }

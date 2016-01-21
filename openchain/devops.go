@@ -22,16 +22,17 @@ package openchain
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 
-	"github.com/blang/semver"
 	"github.com/op/go-logging"
 	"github.com/spf13/viper"
 	"golang.org/x/net/context"
 
 	"github.com/openblockchain/obc-peer/openchain/chaincode"
 	"github.com/openblockchain/obc-peer/openchain/container"
+	"github.com/openblockchain/obc-peer/openchain/crypto"
 	"github.com/openblockchain/obc-peer/openchain/peer"
 	"github.com/openblockchain/obc-peer/openchain/util"
 	pb "github.com/openblockchain/obc-peer/protos"
@@ -51,6 +52,16 @@ type Devops struct {
 	coord peer.MessageHandlerCoordinator
 }
 
+// Login establishes the security context with the Devops service
+func (d *Devops) Login(ctx context.Context, secret *pb.Secret) (*pb.Response, error) {
+	if err := crypto.RegisterClient(secret.EnrollId, nil, secret.EnrollId, secret.EnrollSecret); nil != err {
+		return &pb.Response{Status: pb.Response_FAILURE, Msg: []byte(err.Error())}, nil
+	}
+	return &pb.Response{Status: pb.Response_SUCCESS}, nil
+
+	// TODO: Handle timeout and expiration
+}
+
 // Build builds the supplied chaincode image
 func (*Devops) Build(context context.Context, spec *pb.ChaincodeSpec) (*pb.ChaincodeDeploymentSpec, error) {
 	mode := viper.GetString("chaincode.mode")
@@ -60,16 +71,38 @@ func (*Devops) Build(context context.Context, spec *pb.ChaincodeSpec) (*pb.Chain
 		if err := CheckSpec(spec); err != nil {
 			return nil, err
 		}
-		// Get new VM and as for building of container image
+
 		vm, err := container.NewVM()
 		if err != nil {
-			devopsLogger.Error(fmt.Sprintf("Error getting VM: %s", err))
-			return nil, err
+			return nil, fmt.Errorf("Error getting vm")
 		}
-		// Build the spec
+
 		codePackageBytes, err = vm.BuildChaincodeContainer(spec)
 		if err != nil {
-			devopsLogger.Error(fmt.Sprintf("Error getting VM: %s", err))
+			err = fmt.Errorf("Error getting chaincode package bytes: %s", err)
+			devopsLogger.Error(fmt.Sprintf("%s", err))
+			return nil, err
+		}
+	}
+	chaincodeDeploymentSpec := &pb.ChaincodeDeploymentSpec{ChaincodeSpec: spec, CodePackage: codePackageBytes}
+	return chaincodeDeploymentSpec, nil
+}
+
+// get chaincode bytes
+func (*Devops) getChaincodeBytes(context context.Context, spec *pb.ChaincodeSpec) (*pb.ChaincodeDeploymentSpec, error) {
+	mode := viper.GetString("chaincode.mode")
+	var codePackageBytes []byte
+	if mode != chaincode.DevModeUserRunsChaincode {
+		devopsLogger.Debug("Received build request for chaincode spec: %v", spec)
+		var err error
+		if err = CheckSpec(spec); err != nil {
+			return nil, err
+		}
+
+		codePackageBytes, err = container.GetChaincodePackageBytes(spec)
+		if err != nil {
+			err = fmt.Errorf("Error getting chaincode package bytes: %s", err)
+			devopsLogger.Error(fmt.Sprintf("%s", err))
 			return nil, err
 		}
 	}
@@ -79,27 +112,56 @@ func (*Devops) Build(context context.Context, spec *pb.ChaincodeSpec) (*pb.Chain
 
 // Deploy deploys the supplied chaincode image to the validators through a transaction
 func (d *Devops) Deploy(ctx context.Context, spec *pb.ChaincodeSpec) (*pb.ChaincodeDeploymentSpec, error) {
-	// First build and get the deployment spec
-	chaincodeDeploymentSpec, err := d.Build(ctx, spec)
+	// get the deployment spec
+	chaincodeDeploymentSpec, err := d.getChaincodeBytes(ctx, spec)
 
 	if err != nil {
 		devopsLogger.Error(fmt.Sprintf("Error deploying chaincode spec: %v\n\n error: %s", spec, err))
 		return nil, err
 	}
-	//devopsLogger.Debug("returning status: %s", status)
+
 	// Now create the Transactions message and send to Peer.
-	uuid, uuidErr := util.GenerateUUID()
-	if uuidErr != nil {
-		devopsLogger.Error(fmt.Sprintf("Error generating UUID: %s", uuidErr))
-		return nil, uuidErr
-	}
-	transaction, err := pb.NewChaincodeDeployTransaction(chaincodeDeploymentSpec, uuid)
-	if err != nil {
-		return nil, fmt.Errorf("Error deploying chaincode: %s ", err)
+
+	transID := chaincodeDeploymentSpec.ChaincodeSpec.ChaincodeID.Name
+
+	var tx *pb.Transaction
+	var sec crypto.Client
+
+	if viper.GetBool("security.enabled") {
+		if devopsLogger.IsEnabledFor(logging.DEBUG) {
+			devopsLogger.Debug("Initializing secure devops using context %s", spec.SecureContext)
+		}
+		sec, err = crypto.InitClient(spec.SecureContext, nil)
+		defer crypto.CloseClient(sec)
+
+		// remove the security context since we are no longer need it down stream
+		spec.SecureContext = ""
+
+		if nil != err {
+			return nil, err
+		}
+
+		if devopsLogger.IsEnabledFor(logging.DEBUG) {
+			devopsLogger.Debug("Creating secure transaction %s", transID)
+		}
+		tx, err = sec.NewChaincodeDeployTransaction(chaincodeDeploymentSpec, transID)
+		if nil != err {
+			return nil, err
+		}
+	} else {
+		if devopsLogger.IsEnabledFor(logging.DEBUG) {
+			devopsLogger.Debug("Creating deployment transaction (%s)", transID)
+		}
+		tx, err = pb.NewChaincodeDeployTransaction(chaincodeDeploymentSpec, transID)
+		if err != nil {
+			return nil, fmt.Errorf("Error deploying chaincode: %s ", err)
+		}
 	}
 
-	devopsLogger.Debug("Sending deploy transaction (%s) to validator", transaction.Uuid)
-	resp := d.coord.ExecuteTransaction(transaction)
+	if devopsLogger.IsEnabledFor(logging.DEBUG) {
+		devopsLogger.Debug("Sending deploy transaction (%s) to validator", tx.Uuid)
+	}
+	resp := d.coord.ExecuteTransaction(tx)
 	if resp.Status == pb.Response_FAILURE {
 		err = fmt.Errorf(string(resp.Msg))
 	}
@@ -109,6 +171,10 @@ func (d *Devops) Deploy(ctx context.Context, spec *pb.ChaincodeSpec) (*pb.Chainc
 
 func (d *Devops) invokeOrQuery(ctx context.Context, chaincodeInvocationSpec *pb.ChaincodeInvocationSpec, invoke bool) (*pb.Response, error) {
 
+	if chaincodeInvocationSpec.ChaincodeSpec.ChaincodeID.Name == "" {
+		return nil, fmt.Errorf("name not given for invoke/query")
+	}
+
 	// Now create the Transactions message and send to Peer.
 	uuid, uuidErr := util.GenerateUUID()
 	if uuidErr != nil {
@@ -117,37 +183,71 @@ func (d *Devops) invokeOrQuery(ctx context.Context, chaincodeInvocationSpec *pb.
 	}
 	var transaction *pb.Transaction
 	var err error
-	if invoke {
-		transaction, err = pb.NewChaincodeExecute(chaincodeInvocationSpec, uuid, pb.Transaction_CHAINCODE_EXECUTE)
-	} else {
-		transaction, err = pb.NewChaincodeExecute(chaincodeInvocationSpec, uuid, pb.Transaction_CHAINCODE_QUERY)
+	var sec crypto.Client
+	if viper.GetBool("security.enabled") {
+		if devopsLogger.IsEnabledFor(logging.DEBUG) {
+			devopsLogger.Debug("Initializing secure devops using context %s", chaincodeInvocationSpec.ChaincodeSpec.SecureContext)
+		}
+		sec, err = crypto.InitClient(chaincodeInvocationSpec.ChaincodeSpec.SecureContext, nil)
+		defer crypto.CloseClient(sec)
+		// remove the security context since we are no longer need it down stream
+		chaincodeInvocationSpec.ChaincodeSpec.SecureContext = ""
+		if nil != err {
+			return nil, err
+		}
 	}
+	transaction, err = d.createExecTx(chaincodeInvocationSpec, uuid, invoke, sec)
 	if err != nil {
-		return nil, fmt.Errorf("Error deploying chaincode: %s ", err)
+		return nil, err
 	}
-
-	// mode := viper.GetString("chaincode.mode")
-
-	// //in dev mode, we invoke locally (whether user runs chaincode or validator does)
-	// if mode == chaincode.DevModeUserRunsChaincode {
-	// 	if invoke {
-	// 		chaincode.Execute(ctx, chaincode.GetChain(chaincode.DefaultChain), transaction)
-	// 		return &pb.Response{Status: pb.Response_SUCCESS, Msg: []byte(transaction.Uuid)}, nil
-	// 	}
-	// 	payload, execErr := chaincode.Execute(ctx, chaincode.GetChain(chaincode.DefaultChain), transaction)
-	// 	if execErr != nil {
-	// 		return &pb.Response{Status: pb.Response_FAILURE}, execErr
-	// 	}
-	// 	return &pb.Response{Status: pb.Response_SUCCESS, Msg: payload}, nil
-	// }
-
-	devopsLogger.Debug("Sending invocation transaction (%s) to validator", transaction.Uuid)
+	if devopsLogger.IsEnabledFor(logging.DEBUG) {
+		devopsLogger.Debug("Sending invocation transaction (%s) to validator", transaction.Uuid)
+	}
 	resp := d.coord.ExecuteTransaction(transaction)
 	if resp.Status == pb.Response_FAILURE {
 		err = fmt.Errorf(string(resp.Msg))
+	} else {
+		if !invoke && nil != sec && viper.GetBool("security.privacy") {
+			if resp.Msg, err = sec.DecryptQueryResult(transaction, resp.Msg); nil != err {
+				devopsLogger.Debug("Failed decrypting query transaction result %s", string(resp.Msg[:]))
+				//resp = &pb.Response{Status: pb.Response_FAILURE, Msg: []byte(err.Error())}
+			}
+		}
 	}
-
 	return resp, err
+}
+
+func (d *Devops) createExecTx(spec *pb.ChaincodeInvocationSpec, uuid string, invokeTx bool, sec crypto.Client) (*pb.Transaction, error) {
+	var tx *pb.Transaction
+	var err error
+	if nil != sec {
+		if devopsLogger.IsEnabledFor(logging.DEBUG) {
+			devopsLogger.Debug("Creating secure invocation transaction %s", uuid)
+		}
+		if invokeTx {
+			tx, err = sec.NewChaincodeExecute(spec, uuid)
+		} else {
+			tx, err = sec.NewChaincodeQuery(spec, uuid)
+		}
+		if nil != err {
+			return nil, err
+		}
+	} else {
+		if devopsLogger.IsEnabledFor(logging.DEBUG) {
+			devopsLogger.Debug("Creating invocation transaction (%s)", uuid)
+		}
+		var t pb.Transaction_Type
+		if invokeTx {
+			t = pb.Transaction_CHAINCODE_EXECUTE
+		} else {
+			t = pb.Transaction_CHAINCODE_QUERY
+		}
+		tx, err = pb.NewChaincodeExecute(spec, uuid, t)
+		if nil != err {
+			return nil, err
+		}
+	}
+	return tx, nil
 }
 
 // Invoke performs the supplied invocation on the specified chaincode through a transaction
@@ -176,19 +276,27 @@ func CheckSpec(spec *pb.ChaincodeSpec) error {
 	}
 	devopsLogger.Debug("Validated spec:  %v", spec)
 
-	// Check the version
-	_, err := semver.Make(spec.ChaincodeID.Version)
-	return err
+	return nil
 }
 
 func checkGolangSpec(spec *pb.ChaincodeSpec) error {
-	pathToCheck := filepath.Join(os.Getenv("GOPATH"), "src", spec.ChaincodeID.Url)
-	exists, err := pathExists(pathToCheck)
-	if err != nil {
-		return fmt.Errorf("Error validating chaincode path: %s", err)
+	url, err := url.Parse(spec.ChaincodeID.Path)
+	if err != nil || url == nil {
+		return fmt.Errorf("invalid path: %s", err)
 	}
-	if !exists {
-		return fmt.Errorf("Path to chaincode does not exist: %s", spec.ChaincodeID.Url)
+
+	//we have no real good way of checking existence of remote urls except by downloading and testin
+	//which we do later anyway. But we *can* - and *should* - test for existence of local paths.
+	//Treat empty scheme as a local filesystem path
+	if url.Scheme == "" {
+		pathToCheck := filepath.Join(os.Getenv("GOPATH"), "src", spec.ChaincodeID.Path)
+		exists, err := pathExists(pathToCheck)
+		if err != nil {
+			return fmt.Errorf("Error validating chaincode path: %s", err)
+		}
+		if !exists {
+			return fmt.Errorf("Path to chaincode does not exist: %s", spec.ChaincodeID.Path)
+		}
 	}
 	return nil
 }
@@ -203,54 +311,4 @@ func pathExists(path string) (bool, error) {
 		return false, nil
 	}
 	return true, err
-}
-
-//BuildLocal builds a given chaincode code
-func BuildLocal(context context.Context, spec *pb.ChaincodeSpec) (*pb.ChaincodeDeploymentSpec, error) {
-	devopsLogger.Debug("Received build request for chaincode spec: %v", spec)
-	mode := viper.GetString("chaincode.mode")
-	var codePackageBytes []byte
-	if mode != chaincode.DevModeUserRunsChaincode {
-		if err := CheckSpec(spec); err != nil {
-			devopsLogger.Debug("check spec failed: %s", err)
-			return nil, err
-		}
-		// Get new VM and as for building of container image
-		vm, err := container.NewVM()
-		if err != nil {
-			devopsLogger.Error(fmt.Sprintf("Error getting VM: %s", err))
-			return nil, err
-		}
-		// Build the spec
-		codePackageBytes, err = vm.BuildChaincodeContainer(spec)
-		if err != nil {
-			devopsLogger.Error(fmt.Sprintf("Error getting VM: %s", err))
-			return nil, err
-		}
-	}
-	chaincodeDeploymentSpec := &pb.ChaincodeDeploymentSpec{ChaincodeSpec: spec, CodePackage: codePackageBytes}
-	return chaincodeDeploymentSpec, nil
-}
-
-// DeployLocal deploys the supplied chaincode image to the local peer
-func DeployLocal(ctx context.Context, spec *pb.ChaincodeSpec) ([]byte, error) {
-	// First build and get the deployment spec
-	chaincodeDeploymentSpec, err := BuildLocal(ctx, spec)
-
-	if err != nil {
-		devopsLogger.Error(fmt.Sprintf("Error deploying chaincode spec: %v\n\n error: %s", spec, err))
-		return nil, err
-	}
-	//devopsLogger.Debug("returning status: %s", status)
-	// Now create the Transactions message and send to Peer.
-	uuid, uuidErr := util.GenerateUUID()
-	if uuidErr != nil {
-		devopsLogger.Error(fmt.Sprintf("Error generating UUID: %s", uuidErr))
-		return nil, uuidErr
-	}
-	transaction, err := pb.NewChaincodeDeployTransaction(chaincodeDeploymentSpec, uuid)
-	if err != nil {
-		return nil, fmt.Errorf("Error deploying chaincode: %s ", err)
-	}
-	return chaincode.Execute(ctx, chaincode.GetChain(chaincode.DefaultChain), transaction)
 }

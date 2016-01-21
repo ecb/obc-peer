@@ -41,6 +41,15 @@ func Execute(ctxt context.Context, chain *ChaincodeSupport, t *pb.Transaction) (
 		return nil, fmt.Errorf("Failed to get handle to ledger (%s)", ledgerErr)
 	}
 
+	if secHelper := chain.getSecHelper(); nil != secHelper {
+		var err error
+		t, err = secHelper.TransactionPreExecution(t)
+		// Note that t is now decrypted and is a deep clone of the original input t
+		if nil != err {
+			return nil, err
+		}
+	}
+
 	if t.Type == pb.Transaction_CHAINCODE_NEW {
 		_, err := chain.DeployChaincode(ctxt, t)
 		if err != nil {
@@ -64,7 +73,7 @@ func Execute(ctxt context.Context, chain *ChaincodeSupport, t *pb.Transaction) (
 		}
 
 		//this should work because it worked above...
-		chaincode, _ := getChaincodeID(cID)
+		chaincode := cID.Name
 
 		if err != nil {
 			return nil, fmt.Errorf("Failed to stablish stream to container %s", chaincode)
@@ -92,11 +101,11 @@ func Execute(ctxt context.Context, chain *ChaincodeSupport, t *pb.Transaction) (
 		}
 
 		markTxBegin(ledger, t)
-		resp, err := chain.Execute(ctxt, chaincode, ccMsg, timeout)
+		resp, err := chain.Execute(ctxt, chaincode, ccMsg, timeout, t)
 		if err != nil {
 			// Rollback transaction
 			markTxFinish(ledger, t, false)
-			fmt.Printf("Got ERROR inside execute")
+			//fmt.Printf("Got ERROR inside execute %s\n", err)
 			return nil, fmt.Errorf("Failed to execute transaction or query(%s)", err)
 		} else if resp == nil {
 			// Rollback transaction
@@ -128,6 +137,7 @@ func Execute(ctxt context.Context, chain *ChaincodeSupport, t *pb.Transaction) (
 func ExecuteTransactions(ctxt context.Context, cname ChainName, xacts []*pb.Transaction) ([]byte, []error) {
 	var chain = GetChain(cname)
 	if chain == nil {
+		// TODO: We should never get here, but otherwise a good reminder to better handle
 		panic(fmt.Sprintf("[ExecuteTransactions]Chain %s not found\n", cname))
 	}
 	errs := make([]error, len(xacts)+1)
@@ -143,12 +153,26 @@ func ExecuteTransactions(ctxt context.Context, cname ChainName, xacts []*pb.Tran
 	return statehash, errs
 }
 
+// GetSecureContext returns the security context from the context object or error
+// Security context is nil if security is off from openchain.yaml file
+// func GetSecureContext(ctxt context.Context) (crypto.Peer, error) {
+// 	var err error
+// 	temp := ctxt.Value("security")
+// 	if nil != temp {
+// 		if secCxt, ok := temp.(crypto.Peer); ok {
+// 			return secCxt, nil
+// 		}
+// 		err = errors.New("Failed to convert security context type")
+// 	}
+// 	return nil, err
+// }
+
 var errFailedToGetChainCodeSpecForTransaction = errors.New("Failed to get ChainCodeSpec from Transaction")
 
 func getTimeout(cID *pb.ChaincodeID) (time.Duration, error) {
 	ledger, err := ledger.GetLedger()
 	if err == nil {
-		chaincodeID, _ := getChaincodeID(cID)
+		chaincodeID := cID.Name
 		txUUID, err := ledger.GetState(chaincodeID, "github.com_openblockchain_obc-peer_chaincode_id", true)
 		if err == nil {
 			tx, err := ledger.GetTransactionByUUID(string(txUUID))
