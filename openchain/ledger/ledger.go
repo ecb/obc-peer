@@ -95,7 +95,7 @@ func (ledger *Ledger) BeginTxBatch(id interface{}) error {
 // by a transaction between these two calls, the hash will be different. The
 // preview block does not include non-hashed data such as the local timestamp.
 func (ledger *Ledger) GetTXBatchPreviewBlock(id interface{},
-	transactions []*protos.Transaction, proof []byte) (*protos.Block, error) {
+	transactions []*protos.Transaction, metadata []byte) (*protos.Block, error) {
 	err := ledger.checkValidIDCommitORRollback(id)
 	if err != nil {
 		return nil, err
@@ -104,13 +104,13 @@ func (ledger *Ledger) GetTXBatchPreviewBlock(id interface{},
 	if err != nil {
 		return nil, err
 	}
-	return ledger.blockchain.buildBlock(protos.NewBlock(transactions), stateHash), nil
+	return ledger.blockchain.buildBlock(protos.NewBlock(transactions, metadata), stateHash), nil
 }
 
 // CommitTxBatch - gets invoked when the current transaction-batch needs to be committed
 // This function returns successfully iff the transactions details and state changes (that
 // may have happened during execution of this transaction-batch) have been committed to permanent storage
-func (ledger *Ledger) CommitTxBatch(id interface{}, transactions []*protos.Transaction, transactionResults []*protos.TransactionResult, proof []byte) error {
+func (ledger *Ledger) CommitTxBatch(id interface{}, transactions []*protos.Transaction, transactionResults []*protos.TransactionResult, metadata []byte) error {
 	err := ledger.checkValidIDCommitORRollback(id)
 	if err != nil {
 		return err
@@ -127,7 +127,7 @@ func (ledger *Ledger) CommitTxBatch(id interface{}, transactions []*protos.Trans
 	}
 
 	writeBatch := gorocksdb.NewWriteBatch()
-	block := protos.NewBlock(transactions)
+	block := protos.NewBlock(transactions, metadata)
 	block.NonHashData = &protos.NonHashData{TransactionResults: transactionResults}
 	newBlockNumber, err := ledger.blockchain.addPersistenceChangesForNewBlock(context.TODO(), block, stateHash, writeBatch)
 	if err != nil {
@@ -193,8 +193,11 @@ func (ledger *Ledger) GetState(chaincodeID string, key string, committed bool) (
 
 // GetStateRangeScanIterator returns an iterator to get all the keys (and values) between startKey and endKey
 // (assuming lexical order of the keys) for a chaincodeID.
-func (ledger *Ledger) GetStateRangeScanIterator(chaincodeID string, startKey string, endKey string) (statemgmt.RangeScanIterator, error) {
-	return ledger.state.GetRangeScanIterator(chaincodeID, startKey, endKey)
+// If committed is true, the key-values are retrived only from the db. If committed is false, the results from db
+// are mergerd with the results in memory (giving preference to in-memory data)
+// The key-values in the returned iterator are not guaranteed to be in any specific order
+func (ledger *Ledger) GetStateRangeScanIterator(chaincodeID string, startKey string, endKey string, committed bool) (statemgmt.RangeScanIterator, error) {
+	return ledger.state.GetRangeScanIterator(chaincodeID, startKey, endKey, committed)
 }
 
 // SetState sets state to given value for chaincodeID and key. Does not immideatly writes to DB

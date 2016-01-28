@@ -232,6 +232,7 @@ func (m *TransactionResult) String() string { return proto.CompactTextString(m) 
 func (*TransactionResult) ProtoMessage()    {}
 
 // Block carries The data that describes a block in the blockchain.
+// version - Version used to track any protocol changes.
 // timestamp - The time at which the block or transaction order
 // was proposed. This may not be used by all consensus modules.
 // transactions - The ordered list of transactions in the block.
@@ -243,6 +244,7 @@ func (*TransactionResult) ProtoMessage()    {}
 // hash. This allows this data to be different per peer or discarded without
 // impacting the blockchain.
 type Block struct {
+	Version           uint32                     `protobuf:"varint,1,opt,name=version" json:"version,omitempty"`
 	Timestamp         *google_protobuf.Timestamp `protobuf:"bytes,2,opt,name=timestamp" json:"timestamp,omitempty"`
 	Transactions      []*Transaction             `protobuf:"bytes,3,rep,name=transactions" json:"transactions,omitempty"`
 	StateHash         []byte                     `protobuf:"bytes,4,opt,name=stateHash,proto3" json:"stateHash,omitempty"`
@@ -325,6 +327,7 @@ type PeerEndpoint struct {
 	ID      *PeerID           `protobuf:"bytes,1,opt,name=ID" json:"ID,omitempty"`
 	Address string            `protobuf:"bytes,2,opt,name=address" json:"address,omitempty"`
 	Type    PeerEndpoint_Type `protobuf:"varint,3,opt,name=type,enum=protos.PeerEndpoint_Type" json:"type,omitempty"`
+	PkiID   []byte            `protobuf:"bytes,4,opt,name=pkiID,proto3" json:"pkiID,omitempty"`
 }
 
 func (m *PeerEndpoint) Reset()         { *m = PeerEndpoint{} }
@@ -373,6 +376,7 @@ type OpenchainMessage struct {
 	Type      OpenchainMessage_Type      `protobuf:"varint,1,opt,name=type,enum=protos.OpenchainMessage_Type" json:"type,omitempty"`
 	Timestamp *google_protobuf.Timestamp `protobuf:"bytes,2,opt,name=timestamp" json:"timestamp,omitempty"`
 	Payload   []byte                     `protobuf:"bytes,3,opt,name=payload,proto3" json:"payload,omitempty"`
+	Signature []byte                     `protobuf:"bytes,4,opt,name=signature,proto3" json:"signature,omitempty"`
 }
 
 func (m *OpenchainMessage) Reset()         { *m = OpenchainMessage{} }

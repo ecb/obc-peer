@@ -3,11 +3,11 @@ server:
         version: "0.1"
         rootpath: "."
         cadir: ".obcca"
-        port: ":50051"
+        port: ":50951"
         
         tls:
-#                certfile:
-#                keyfile:
+                certfile: ".obcca/tlsca.cert"
+                keyfile: ".obcca/tlsca.priv"
 
 ###############################################################################
 #
