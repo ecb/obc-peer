@@ -73,13 +73,15 @@ type MockLedger struct {
 
 	mutex *sync.Mutex
 
-	txID     interface{}
-	curBatch []*protos.Transaction
+	txID          interface{}
+	curBatch      []*protos.Transaction
+	curResults    []byte
+	preBatchState uint64
 
 	deltaID       interface{}
 	preDeltaValue uint64
 
-	inst *instance // To support the ExecTX stuff
+	inst *instance // To support the ExecTx stuff
 }
 
 func NewMockLedger(remoteLedgers *map[protos.PeerID]consensus.ReadOnlyLedger, filter func(request mockRequest, peerID *protos.PeerID) mockResponse) *MockLedger {
@@ -97,18 +99,12 @@ func NewMockLedger(remoteLedgers *map[protos.PeerID]consensus.ReadOnlyLedger, fi
 		mock.filter = filter
 	}
 
-	/* // This might be useful to add back
 	if nil == remoteLedgers {
-		mock.remoteLedgers = make(map[uint64]consensus.ReadOnlyLedger)
-		DummyLedger := &MockRemoteLedger{^uint64(0)}
-		for i := uint64(0); i < 100; i++ {
-			mock.remoteLedgers[i] = DummyLedger
-		}
+		tmp := make(map[protos.PeerID]consensus.ReadOnlyLedger)
+		mock.remoteLedgers = &tmp
 	} else {
 		mock.remoteLedgers = remoteLedgers
 	}
-	*/
-	mock.remoteLedgers = remoteLedgers
 
 	return mock
 }
@@ -119,32 +115,63 @@ func (mock *MockLedger) BeginTxBatch(id interface{}) error {
 	}
 	mock.txID = id
 	mock.curBatch = nil
+	mock.curResults = nil
+	mock.preBatchState = mock.state
 	return nil
 }
 
-func (mock *MockLedger) ExecTXs(txs []*protos.Transaction) ([]byte, []error) {
-	mock.curBatch = append(mock.curBatch, txs...)
-	errs := make([]error, len(txs)+1)
-	if mock.inst.execTxResult != nil {
-		return mock.inst.execTxResult(txs)
-	}
-	return nil, errs
-}
-
-func (mock *MockLedger) CommitTxBatch(id interface{}, txs []*protos.Transaction, txResults []*protos.TransactionResult, metadata []byte) error {
-	_, err := mock.commonCommitTx(id, txs, txResults, metadata, false)
-	if nil == err {
-		mock.txID = nil
-	}
-	return err
-}
-
-func (mock *MockLedger) commonCommitTx(id interface{}, txs []*protos.Transaction, txResults []*protos.TransactionResult, metadata []byte, preview bool) (*protos.Block, error) {
+func (mock *MockLedger) ExecTxs(id interface{}, txs []*protos.Transaction) ([]byte, error) {
 	if !reflect.DeepEqual(mock.txID, id) {
 		return nil, fmt.Errorf("Invalid batch ID")
 	}
-	if !reflect.DeepEqual(txs, mock.curBatch) {
-		return nil, fmt.Errorf("Tx list does not match executed Tx batch")
+
+	mock.curBatch = append(mock.curBatch, txs...)
+	var err error
+	var txResult []byte
+	if mock.inst.execTxResult != nil {
+		txResult, err = mock.inst.execTxResult(txs)
+	} else {
+		// This is basically a default fake default transaction execution
+		if nil == txs {
+			txs = []*protos.Transaction{&protos.Transaction{Payload: SimpleGetStateDelta(mock.blockHeight)}}
+		}
+
+		for _, transaction := range txs {
+			if transaction.Payload == nil {
+				transaction.Payload = SimpleGetStateDelta(mock.blockHeight)
+			}
+
+			txResult = append(txResult, transaction.Payload...)
+		}
+
+	}
+
+	buffer := make([]byte, binary.MaxVarintLen64)
+
+	for i, b := range txResult {
+		buffer[i%binary.MaxVarintLen64] += b
+	}
+
+	mock.ApplyStateDelta(id, SimpleBytesToStateDelta(buffer))
+
+	mock.curResults = append(mock.curResults, txResult...)
+
+	return txResult, err
+}
+
+func (mock *MockLedger) CommitTxBatch(id interface{}, metadata []byte) (*protos.Block, error) {
+	block, err := mock.commonCommitTx(id, metadata, false)
+	if nil == err {
+		mock.txID = nil
+		mock.curBatch = nil
+		mock.curResults = nil
+	}
+	return block, err
+}
+
+func (mock *MockLedger) commonCommitTx(id interface{}, metadata []byte, preview bool) (*protos.Block, error) {
+	if !reflect.DeepEqual(mock.txID, id) {
+		return nil, fmt.Errorf("Invalid batch ID")
 	}
 
 	previousBlockHash := []byte("Genesis")
@@ -153,38 +180,23 @@ func (mock *MockLedger) commonCommitTx(id interface{}, txs []*protos.Transaction
 		previousBlockHash, _ = mock.HashBlock(previousBlock)
 	}
 
-	buffer := make([]byte, binary.MaxVarintLen64)
-
-	if nil == txs {
-		txs = []*protos.Transaction{&protos.Transaction{Payload: SimpleGetStateDelta(mock.blockHeight)}}
-	}
-
-	for _, transaction := range txs {
-		if transaction.Payload == nil {
-			transaction.Payload = SimpleGetStateDelta(mock.blockHeight)
-		}
-
-		for i, b := range transaction.Payload {
-			buffer[i%binary.MaxVarintLen64] += b
-		}
-	}
-
-	mock.ApplyStateDelta(id, SimpleBytesToStateDelta(buffer))
-
 	stateHash, _ := mock.GetCurrentStateHash()
 
 	block := &protos.Block{
-		Transactions:      txs,
 		ConsensusMetadata: metadata,
 		PreviousBlockHash: previousBlockHash,
 		StateHash:         stateHash,
+		Transactions:      mock.curBatch,
+		NonHashData: &protos.NonHashData{
+			TransactionResults: []*protos.TransactionResult{
+				&protos.TransactionResult{
+					Result: mock.curResults,
+				},
+			},
+		},
 	}
 
-	if preview {
-		if nil != mock.RollbackStateDelta(id) {
-			panic("Error in delta rollback")
-		}
-	} else {
+	if !preview {
 		if nil != mock.CommitStateDelta(id) {
 			panic("Error in delta construction/application")
 		}
@@ -195,8 +207,8 @@ func (mock *MockLedger) commonCommitTx(id interface{}, txs []*protos.Transaction
 	return block, nil
 }
 
-func (mock *MockLedger) PreviewCommitTxBatchBlock(id interface{}, txs []*protos.Transaction, metadata []byte) (*protos.Block, error) {
-	return mock.commonCommitTx(id, txs, nil, metadata, true)
+func (mock *MockLedger) PreviewCommitTxBatch(id interface{}, metadata []byte) (*protos.Block, error) {
+	return mock.commonCommitTx(id, metadata, true)
 }
 
 func (mock *MockLedger) RollbackTxBatch(id interface{}) error {
@@ -204,7 +216,9 @@ func (mock *MockLedger) RollbackTxBatch(id interface{}) error {
 		return fmt.Errorf("Invalid batch ID")
 	}
 	mock.curBatch = nil
+	mock.curResults = nil
 	mock.txID = nil
+	mock.state = mock.preBatchState
 	return nil
 }
 
@@ -233,6 +247,10 @@ func (mock *MockLedger) HashBlock(block *protos.Block) ([]byte, error) {
 }
 
 func (mock *MockLedger) GetRemoteBlocks(peerID *protos.PeerID, start, finish uint64) (<-chan *protos.SyncBlocks, error) {
+	if _, ok := (*mock.remoteLedgers)[*peerID]; !ok {
+		return nil, fmt.Errorf("Bad peer ID")
+	}
+
 	res := make(chan *protos.SyncBlocks)
 	ft := mock.filter(SyncBlocks, peerID)
 	switch ft {
@@ -286,7 +304,6 @@ func (mock *MockLedger) GetRemoteBlocks(peerID *protos.PeerID, start, finish uin
 					current--
 				}
 			}
-			close(res)
 		}()
 	case Timeout:
 	default:
@@ -297,6 +314,10 @@ func (mock *MockLedger) GetRemoteBlocks(peerID *protos.PeerID, start, finish uin
 }
 
 func (mock *MockLedger) GetRemoteStateSnapshot(peerID *protos.PeerID) (<-chan *protos.SyncStateSnapshot, error) {
+	if _, ok := (*mock.remoteLedgers)[*peerID]; !ok {
+		return nil, fmt.Errorf("Bad peer ID")
+	}
+
 	res := make(chan *protos.SyncStateSnapshot)
 	ft := mock.filter(SyncSnapshot, peerID)
 	switch ft {
@@ -333,8 +354,16 @@ func (mock *MockLedger) GetRemoteStateSnapshot(peerID *protos.PeerID) (<-chan *p
 					}
 					i++
 				}
+				if i == remoteBlockHeight {
+					break
+				}
 			}
-			close(res)
+			res <- &protos.SyncStateSnapshot{
+				Delta:       []byte{},
+				Sequence:    i,
+				BlockNumber: ^uint64(0),
+				Request:     nil,
+			}
 		}()
 	case Timeout:
 	default:
@@ -344,6 +373,10 @@ func (mock *MockLedger) GetRemoteStateSnapshot(peerID *protos.PeerID) (<-chan *p
 }
 
 func (mock *MockLedger) GetRemoteStateDeltas(peerID *protos.PeerID, start, finish uint64) (<-chan *protos.SyncStateDeltas, error) {
+	if _, ok := (*mock.remoteLedgers)[*peerID]; !ok {
+		return nil, fmt.Errorf("Bad peer ID")
+	}
+
 	res := make(chan *protos.SyncStateDeltas)
 	ft := mock.filter(SyncDeltas, peerID)
 	switch ft {
@@ -394,7 +427,6 @@ func (mock *MockLedger) GetRemoteStateDeltas(peerID *protos.PeerID, start, finis
 					current--
 				}
 			}
-			close(res)
 		}()
 	case Timeout:
 	default:
@@ -554,9 +586,17 @@ func SimpleEncodeUint64(num uint64) []byte {
 
 func SimpleHashBlock(block *protos.Block) []byte {
 	buffer := make([]byte, binary.MaxVarintLen64)
-	for _, transaction := range block.Transactions {
-		for i, b := range transaction.Payload {
-			buffer[i%binary.MaxVarintLen64] += b
+	if nil != block.NonHashData && nil != block.NonHashData.TransactionResults {
+		for _, txResult := range block.NonHashData.TransactionResults {
+			for i, b := range txResult.Result {
+				buffer[i%binary.MaxVarintLen64] += b
+			}
+		}
+	} else {
+		for _, transaction := range block.Transactions {
+			for i, b := range transaction.Payload {
+				buffer[i%binary.MaxVarintLen64] += b
+			}
 		}
 	}
 	return []byte(fmt.Sprintf("BlockHash:%s-%s-%s", buffer, block.StateHash, block.ConsensusMetadata))
@@ -640,6 +680,8 @@ func TestMockLedger(t *testing.T) {
 
 	blockMessages, err := ml.GetRemoteBlocks(rlPeerID, 10, 0)
 
+	success := false
+
 	for blockMessage := range blockMessages {
 		current := blockMessage.Range.Start
 		i := 0
@@ -657,6 +699,14 @@ func TestMockLedger(t *testing.T) {
 				current--
 			}
 		}
+		if current == 0 {
+			success = true
+			break
+		}
+	}
+
+	if !success {
+		t.Fatalf("Expected more blocks before channel close")
 	}
 
 	blockNumber, err := ml.VerifyBlockchain(10, 0)
@@ -686,8 +736,14 @@ func TestMockLedger(t *testing.T) {
 		t.Fatalf("Remote state snapshot call failed, error in mock ledger implementation: %s", err)
 	}
 
+	success = false
 	_ = ml.EmptyState() // Never fails
 	for syncStateMessage := range syncStateMessages {
+		if 0 == len(syncStateMessage.Delta) {
+			success = true
+			break
+		}
+
 		delta := &statemgmt.StateDelta{}
 		if err := delta.Unmarshal(syncStateMessage.Delta); nil != err {
 			t.Fatalf("Error unmarshaling state delta : %s", err)
@@ -700,6 +756,10 @@ func TestMockLedger(t *testing.T) {
 		if err := ml.CommitStateDelta(blockNumber); err != nil {
 			t.Fatalf("Error committing state delta : %s", err)
 		}
+	}
+
+	if !success {
+		t.Fatalf("Expected nil slice to finish snapshot transfer")
 	}
 
 	block10, err := ml.GetBlock(10)

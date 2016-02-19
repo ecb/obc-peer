@@ -34,7 +34,7 @@ import (
 
 // Handler peer handler implementation.
 type Handler struct {
-	chatMutex	               sync.Mutex
+	chatMutex                     sync.Mutex
 	ToPeerEndpoint                *pb.PeerEndpoint
 	Coordinator                   MessageHandlerCoordinator
 	ChatStream                    ChatStream
@@ -110,10 +110,14 @@ func (d *Handler) enterState(e *fsm.Event) {
 }
 
 func (d *Handler) deregister() error {
+	var err error
 	if d.registered {
-		return d.Coordinator.DeregisterHandler(d)
+		err = d.Coordinator.DeregisterHandler(d)
+		//doneChan is created and waiting for registered handlers only
+		d.doneChan <- struct{}{}
+		d.registered = false
 	}
-	return nil
+	return err
 }
 
 // To return the PeerEndpoint this Handler is connected to.
@@ -128,8 +132,6 @@ func (d *Handler) To() (pb.PeerEndpoint, error) {
 func (d *Handler) Stop() error {
 	// Deregister the handler
 	err := d.deregister()
-	d.doneChan <- struct{}{}
-	d.registered = false
 	if err != nil {
 		return fmt.Errorf("Error stopping MessageHandler: %s", err)
 	}
@@ -405,7 +407,8 @@ func (d *Handler) beforeSyncBlocks(e *fsm.Event) {
 		e.Cancel(fmt.Errorf("Error unmarshalling SyncBlocks in beforeSyncBlocks: %s", err))
 		return
 	}
-	peerLogger.Debug("TODO: send received syncBlocks for start = %d and end = %d message to channel", syncBlocks.Range.Start, syncBlocks.Range.End)
+
+	peerLogger.Debug("Sending block onto channel for start = %d and end = %d", syncBlocks.Range.Start, syncBlocks.Range.End)
 
 	// Send the message onto the channel, allow for the fact that channel may be closed on send attempt.
 	defer func() {
@@ -427,7 +430,8 @@ func (d *Handler) sendBlocks(syncBlockRange *pb.SyncBlockRange) {
 	var blockNums []uint64
 	if syncBlockRange.Start > syncBlockRange.End {
 		// Send in reverse order
-		for i := syncBlockRange.Start; i >= syncBlockRange.End; i-- {
+		// note that i is a uint so decrementing i below 0 results in an underflow (i becomes uint.MaxValue). Always stop after i == 0
+		for i := syncBlockRange.Start; i >= syncBlockRange.End && i <= syncBlockRange.Start; i-- {
 			blockNums = append(blockNums, i)
 		}
 	} else {
@@ -701,7 +705,7 @@ func (d *Handler) beforeSyncStateDeltas(e *fsm.Event) {
 		e.Cancel(fmt.Errorf("Error unmarshalling SyncStateDeltas in beforeSyncStateDeltas: %s", err))
 		return
 	}
-	peerLogger.Debug("TODO: send received syncBlocks for start = %d and end = %d message to channel", syncStateDeltas.Range.Start, syncStateDeltas.Range.End)
+	peerLogger.Debug("Sending state delta onto channel for start = %d and end = %d", syncStateDeltas.Range.Start, syncStateDeltas.Range.End)
 
 	// Send the message onto the channel, allow for the fact that channel may be closed on send attempt.
 	defer func() {
